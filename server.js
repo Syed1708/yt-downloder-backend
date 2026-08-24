@@ -8,32 +8,17 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// Setup Cookie Path
+// Locate cookies file (Render places Secret Files in /etc/secrets/)
 const getCookiesPath = () => {
-  const tmpPath = '/tmp/cookies.txt';
   const renderSecretPath = '/etc/secrets/cookies.txt';
   const localPath = path.resolve(__dirname, 'cookies.txt');
 
-  // 1. Check if cookies were passed via Render Environment Variable
-  if (process.env.YOUTUBE_COOKIES) {
-    fs.writeFileSync(tmpPath, process.env.YOUTUBE_COOKIES.trim(), 'utf8');
-    console.log('[AUTH] ✅ Loaded cookies from YOUTUBE_COOKIES environment variable');
-    return tmpPath;
-  }
-
-  // 2. Check if cookies exist as a Render Secret File
   if (fs.existsSync(renderSecretPath)) {
-    console.log('[AUTH] ✅ Found cookies at /etc/secrets/cookies.txt');
     return renderSecretPath;
   }
-
-  // 3. Check local directory
   if (fs.existsSync(localPath)) {
-    console.log('[AUTH] ✅ Found cookies in local project directory');
     return localPath;
   }
-
-  console.warn('[AUTH] ⚠️ WARNING: No cookies found! YouTube may block requests.');
   return null;
 };
 
@@ -43,7 +28,8 @@ const getOptions = () => {
     noCheckCertificates: true,
     noWarnings: true,
     preferFreeFormats: true,
-    extractorArgs: 'youtube:player_client=ios,android,mweb',
+    // Use Android/iOS clients which bypass desktop web bot challenges
+    extractorArgs: 'youtube:player_client=android,ios',
   };
 
   if (cookiePath) {
@@ -55,10 +41,10 @@ const getOptions = () => {
 
 // --- ROOT ROUTE ---
 app.get('/', (req, res) => {
-  const isLoaded = Boolean(getCookiesPath());
+  const hasCookies = Boolean(getCookiesPath());
   res.send(`
     <h1>YouTube Downloader API is Running</h1>
-    <p>Cookie Status: ${isLoaded ? '✅ <b>Cookies Loaded</b>' : '❌ <b>No Cookies Found</b>'}</p>
+    <p>Cookie Status: ${hasCookies ? '✅ Loaded' : '❌ Not Found'}</p>
   `);
 });
 
@@ -90,7 +76,7 @@ app.post('/api/info', async (req, res) => {
       new Map(formats.map((f) => [f.quality, f])).values()
     );
 
-    console.log(`[SUCCESS] Loaded: "${info.title}" (${uniqueFormats.length} formats)`);
+    console.log(`[SUCCESS] Extracted: "${info.title}"`);
 
     res.json({
       title: info.title,
@@ -104,7 +90,7 @@ app.post('/api/info', async (req, res) => {
     console.error('------------------------');
 
     res.status(500).json({
-      error: error.stderr || error.message || 'Failed to retrieve video from YouTube.',
+      error: error.stderr || error.message || 'Failed to retrieve video metadata.',
     });
   }
 });
@@ -112,8 +98,6 @@ app.post('/api/info', async (req, res) => {
 // --- 2. ENDPOINT TO STREAM DOWNLOAD ---
 app.get('/api/download', (req, res) => {
   const { url, itag, title } = req.query;
-
-  console.log(`[DOWNLOAD] Streaming itag ${itag} for: ${url}`);
 
   const safeTitle = (title || 'video').replace(/[^a-zA-Z0-9_-]/g, '_');
 
