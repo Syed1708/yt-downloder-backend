@@ -1,136 +1,89 @@
 const express = require('express');
 const cors = require('cors');
-const { create } = require('youtube-dl-exec'); // 👈 Import create
-const youtubedl = create('yt-dlp'); // 👈 Forces use of the latest system yt-dlp
-const path = require('path');
-const fs = require('fs');
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
-// Setup Cookie Path
-const getCookiesPath = () => {
-  const tmpPath = '/tmp/cookies.txt';
-  const renderSecretPath = '/etc/secrets/cookies.txt';
-  const localPath = path.resolve(__dirname, 'cookies.txt');
-
-  if (process.env.YOUTUBE_COOKIES) {
-    fs.writeFileSync(tmpPath, process.env.YOUTUBE_COOKIES.trim(), 'utf8');
-    return tmpPath;
-  }
-  if (fs.existsSync(renderSecretPath)) {
-    return renderSecretPath;
-  }
-  if (fs.existsSync(localPath)) {
-    return localPath;
-  }
-  return null;
-};
-
-const getOptions = () => {
-  const cookiePath = getCookiesPath();
-  const options = {
-    noCheckCertificates: true,
-    noWarnings: true,
-    preferFreeFormats: true,
-    // 👇 Key Fix: Use tv_embedded & android to bypass datacenter IP blocks
-    extractorArgs: 'youtube:player_client=tv_embedded,android',
-  };
-
-  if (cookiePath) {
-    options.cookies = cookiePath;
-  }
-
-  return options;
-};
-
 // --- ROOT ROUTE ---
 app.get('/', (req, res) => {
-  const isLoaded = Boolean(getCookiesPath());
-  res.send(`
-    <h1>YouTube Downloader API is Running</h1>
-    <p>Cookie Status: ${isLoaded ? '✅ <b>Cookies Loaded</b>' : '❌ <b>No Cookies Found</b>'}</p>
-  `);
+  res.send('<h1>✅ YouTube Downloader API is Live (Powered by Cobalt Engine)</h1>');
 });
 
 // --- 1. ENDPOINT TO FETCH VIDEO INFO ---
 app.post('/api/info', async (req, res) => {
   const { url } = req.body;
-
-  if (!url) {
-    return res.status(400).json({ error: 'Please provide a valid YouTube URL.' });
-  }
-
-  console.log(`[INFO] Fetching metadata for: ${url}`);
+  if (!url) return res.status(400).json({ error: 'YouTube URL is required' });
 
   try {
-    const info = await youtubedl(url, {
-      dumpSingleJson: true,
-      ...getOptions(),
-    });
+    // Extract video ID from URL
+    const regExp = /^.*(youtu.be\/|v\/|u\/\w\/|embed\/|watch\?v=|\&v=)([^#\&\?]*).*/;
+    const match = url.match(regExp);
+    const videoId = (match && match[2].length === 11) ? match[2] : null;
 
-    const formats = (info.formats || [])
-      .filter((f) => f.vcodec !== 'none' && f.resolution)
-      .map((f) => ({
-        itag: f.format_id,
-        quality: f.resolution || f.format_note || 'Video',
-        container: f.ext || 'mp4',
-      }));
+    // Fetch video title via YouTube oEmbed (Never blocked by cloud IPs)
+    const oembedRes = await fetch(`https://noembed.com/embed?url=${encodeURIComponent(url)}`);
+    const oembedData = await oembedRes.json();
 
-    const uniqueFormats = Array.from(
-      new Map(formats.map((f) => [f.quality, f])).values()
-    );
+    const title = oembedData.title || 'YouTube Video';
+    const thumbnail = videoId 
+      ? `https://img.youtube.com/vi/${videoId}/hqdefault.jpg` 
+      : (oembedData.thumbnail_url || '');
 
-    console.log(`[SUCCESS] Loaded: "${info.title}" (${uniqueFormats.length} formats)`);
+    // Available download qualities
+    const formats = [
+      { itag: '1080', quality: '1080p', container: 'mp4' },
+      { itag: '720', quality: '720p', container: 'mp4' },
+      { itag: '480', quality: '480p', container: 'mp4' },
+      { itag: '360', quality: '360p', container: 'mp4' },
+      { itag: 'audio', quality: 'Audio Only', container: 'mp3' },
+    ];
 
     res.json({
-      title: info.title,
-      thumbnail: info.thumbnail,
-      duration: String(info.duration),
-      formats: uniqueFormats,
+      title,
+      thumbnail,
+      duration: 'Unknown',
+      formats,
     });
-  } catch (error) {
-    console.error('--- EXTRACTION ERROR ---');
-    console.error(error.stderr || error.message || error);
-    console.error('------------------------');
-
-    res.status(500).json({
-      error: error.stderr || error.message || 'Failed to retrieve video from YouTube.',
-    });
+  } catch (err) {
+    console.error('Metadata error:', err);
+    res.status(500).json({ error: 'Failed to retrieve video information.' });
   }
 });
 
-// --- 2. ENDPOINT TO STREAM DOWNLOAD ---
-app.get('/api/download', (req, res) => {
+// --- 2. ENDPOINT TO DOWNLOAD / STREAM VIA COBALT ---
+app.get('/api/download', async (req, res) => {
   const { url, itag, title } = req.query;
 
-  console.log(`[DOWNLOAD] Streaming itag ${itag} for: ${url}`);
+  try {
+    const isAudio = itag === 'audio';
 
-  const safeTitle = (title || 'video').replace(/[^a-zA-Z0-9_-]/g, '_');
+    // Request direct high-speed stream from Cobalt API
+    const response = await fetch('https://api.cobalt.tools/', {
+      method: 'POST',
+      headers: {
+        'Accept': 'application/json',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        url,
+        videoQuality: isAudio ? '720' : itag,
+        downloadMode: isAudio ? 'audio' : 'auto',
+      }),
+    });
 
-  res.header('Content-Disposition', `attachment; filename="${safeTitle}.mp4"`);
-  res.header('Content-Type', 'video/mp4');
+    const data = await response.json();
 
-  const subprocess = youtubedl.exec(url, {
-    format: `${itag}+bestaudio/best`,
-    output: '-',
-    ...getOptions(),
-  });
-
-  subprocess.stdout.pipe(res);
-
-  subprocess.stderr.on('data', (data) => {
-    console.log(`yt-dlp: ${data.toString()}`);
-  });
-
-  subprocess.on('error', (err) => {
-    console.error('[DOWNLOAD ERROR]:', err);
-  });
-
-  req.on('close', () => {
-    subprocess.kill('SIGTERM');
-  });
+    if (data.url) {
+      // Redirect mobile app directly to the high-speed download CDN stream
+      return res.redirect(data.url);
+    } else {
+      throw new Error(data.text || 'Cobalt processing failed');
+    }
+  } catch (err) {
+    console.error('Download error:', err);
+    res.status(500).json({ error: 'Failed to generate download stream.' });
+  }
 });
 
 const PORT = process.env.PORT || 5000;
