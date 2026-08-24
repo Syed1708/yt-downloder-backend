@@ -1,7 +1,8 @@
-FROM node:18-bullseye-slim
+# Use Debian Bookworm (which includes Python 3.11+)
+FROM node:20-bookworm-slim
 
-# Install Python and FFmpeg required by yt-dlp
-RUN apt-get update && apt-get install -y python3 ffmpeg curl && rm -rf /var/lib/apt/lists/*
+# Install Python 3, FFmpeg, and curl
+RUN apt-get update && apt-get install -y python3 python3-pip ffmpeg curl && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
