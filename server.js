@@ -34,6 +34,8 @@ const getOptions = () => {
     noCheckCertificates: true,
     noWarnings: true,
     preferFreeFormats: true,
+    // 👇 Key Fix: Use tv_embedded & android to bypass datacenter IP blocks
+    extractorArgs: 'youtube:player_client=tv_embedded,android',
   };
 
   if (cookiePath) {
