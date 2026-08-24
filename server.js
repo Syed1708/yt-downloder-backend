@@ -1,34 +1,41 @@
 const express = require('express');
 const cors = require('cors');
 const youtubedl = require('youtube-dl-exec');
+const path = require('path');
+const fs = require('fs');
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
+const COOKIES_PATH = path.resolve(__dirname, 'cookies.txt');
+
+// Helper to check if cookies file exists
+const getCookieOption = () => {
+  return fs.existsSync(COOKIES_PATH) ? { cookies: COOKIES_PATH } : {};
+};
+
 // --- ROOT ROUTE ---
 app.get('/', (req, res) => {
-  res.send('<h1>✅ YouTube Downloader API is running!</h1>');
+  res.send('<h1>✅ YouTube Downloader API is running with Cookies!</h1>');
 });
 
 // --- 1. ENDPOINT TO FETCH VIDEO INFO ---
 app.post('/api/info', async (req, res) => {
   try {
     const { url } = req.body;
-
     if (!url) {
       return res.status(400).json({ error: 'Please provide a valid YouTube URL.' });
     }
 
-    // Extract complete video metadata using yt-dlp
     const info = await youtubedl(url, {
       dumpSingleJson: true,
       noCheckCertificates: true,
       noWarnings: true,
       preferFreeFormats: true,
+      ...getCookieOption(), // 👈 Passes cookies.txt if available
     });
 
-    // Filter available video formats
     const formats = (info.formats || [])
       .filter((f) => f.vcodec !== 'none' && f.resolution)
       .map((f) => ({
@@ -37,7 +44,6 @@ app.post('/api/info', async (req, res) => {
         container: f.ext || 'mp4',
       }));
 
-    // Deduplicate format labels (e.g. 720p, 1080p, 360p)
     const uniqueFormats = Array.from(
       new Map(formats.map((f) => [f.quality, f])).values()
     );
@@ -63,10 +69,10 @@ app.get('/api/download', (req, res) => {
   res.header('Content-Disposition', `attachment; filename="${safeTitle}.mp4"`);
   res.header('Content-Type', 'video/mp4');
 
-  // Stream video directly to the client via stdout
   const subprocess = youtubedl.exec(url, {
     format: `${itag}+bestaudio/best`,
-    output: '-', // Pipe output to stdout
+    output: '-',
+    ...getCookieOption(), // 👈 Passes cookies.txt to download stream
   });
 
   subprocess.stdout.pipe(res);
@@ -80,7 +86,7 @@ app.get('/api/download', (req, res) => {
   });
 });
 
-const PORT = 5000;
+const PORT = process.env.PORT || 5000;
 app.listen(PORT, '0.0.0.0', () => {
-  console.log(`Server running at http://localhost:${PORT}`);
+  console.log(`Server running on port ${PORT}`);
 });
