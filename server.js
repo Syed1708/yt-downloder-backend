@@ -10,30 +10,41 @@ app.use(express.json());
 
 const COOKIES_PATH = path.resolve(__dirname, 'cookies.txt');
 
-// Helper to check if cookies file exists
-const getCookieOption = () => {
-  return fs.existsSync(COOKIES_PATH) ? { cookies: COOKIES_PATH } : {};
+const getOptions = () => {
+  const options = {
+    noCheckCertificates: true,
+    noWarnings: true,
+    preferFreeFormats: true,
+    // 👇 Key Fix: Pretend to be YouTube Android app to bypass bot checks
+    extractorArgs: 'youtube:player_client=android,web',
+  };
+
+  if (fs.existsSync(COOKIES_PATH)) {
+    options.cookies = COOKIES_PATH;
+  }
+
+  return options;
 };
 
 // --- ROOT ROUTE ---
 app.get('/', (req, res) => {
-  res.send('<h1>✅ YouTube Downloader API is running with Cookies!</h1>');
+  res.send('<h1>✅ YouTube Downloader API is Running</h1>');
 });
 
 // --- 1. ENDPOINT TO FETCH VIDEO INFO ---
 app.post('/api/info', async (req, res) => {
-  try {
-    const { url } = req.body;
-    if (!url) {
-      return res.status(400).json({ error: 'Please provide a valid YouTube URL.' });
-    }
+  const { url } = req.body;
 
+  if (!url) {
+    return res.status(400).json({ error: 'Please provide a valid YouTube URL.' });
+  }
+
+  console.log(`[INFO] Fetching info for: ${url}`);
+
+  try {
     const info = await youtubedl(url, {
       dumpSingleJson: true,
-      noCheckCertificates: true,
-      noWarnings: true,
-      preferFreeFormats: true,
-      ...getCookieOption(), // 👈 Passes cookies.txt if available
+      ...getOptions(),
     });
 
     const formats = (info.formats || [])
@@ -44,9 +55,12 @@ app.post('/api/info', async (req, res) => {
         container: f.ext || 'mp4',
       }));
 
+    // Keep unique quality labels (e.g. 720p, 1080p, 360p)
     const uniqueFormats = Array.from(
       new Map(formats.map((f) => [f.quality, f])).values()
     );
+
+    console.log(`[SUCCESS] Found ${uniqueFormats.length} formats for: ${info.title}`);
 
     res.json({
       title: info.title,
@@ -55,14 +69,21 @@ app.post('/api/info', async (req, res) => {
       formats: uniqueFormats,
     });
   } catch (error) {
-    console.error('Extraction Error:', error);
-    res.status(500).json({ error: error.stderr || error.message || 'Failed to extract video' });
+    console.error('--- EXTRACTION ERROR ---');
+    console.error(error.stderr || error.message || error);
+    console.error('------------------------');
+    
+    res.status(500).json({ 
+      error: error.stderr || error.message || 'Failed to retrieve video info from YouTube.' 
+    });
   }
 });
 
 // --- 2. ENDPOINT TO STREAM DOWNLOAD ---
 app.get('/api/download', (req, res) => {
   const { url, itag, title } = req.query;
+
+  console.log(`[DOWNLOAD] Starting download for itag ${itag}: ${url}`);
 
   const safeTitle = (title || 'video').replace(/[^a-zA-Z0-9_-]/g, '_');
 
@@ -72,13 +93,17 @@ app.get('/api/download', (req, res) => {
   const subprocess = youtubedl.exec(url, {
     format: `${itag}+bestaudio/best`,
     output: '-',
-    ...getCookieOption(), // 👈 Passes cookies.txt to download stream
+    ...getOptions(),
   });
 
   subprocess.stdout.pipe(res);
 
   subprocess.stderr.on('data', (data) => {
-    console.log(`yt-dlp: ${data.toString()}`);
+    console.log(`yt-dlp log: ${data.toString()}`);
+  });
+
+  subprocess.on('error', (err) => {
+    console.error('[DOWNLOAD ERROR]:', err);
   });
 
   req.on('close', () => {
