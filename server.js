@@ -8,21 +8,32 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// Check both Render Secret File path and Local path
+// Setup Cookie Path
 const getCookiesPath = () => {
-  const renderPath = '/etc/secrets/cookies.txt'; // 👈 Render's Secret File location
-  const localPath = path.resolve(__dirname, 'cookies.txt'); // 👈 Local PC location
+  const tmpPath = '/tmp/cookies.txt';
+  const renderSecretPath = '/etc/secrets/cookies.txt';
+  const localPath = path.resolve(__dirname, 'cookies.txt');
 
-  if (fs.existsSync(renderPath)) {
-    console.log('[AUTH] ✅ Found cookies at Render path: /etc/secrets/cookies.txt');
-    return renderPath;
+  // 1. Check if cookies were passed via Render Environment Variable
+  if (process.env.YOUTUBE_COOKIES) {
+    fs.writeFileSync(tmpPath, process.env.YOUTUBE_COOKIES.trim(), 'utf8');
+    console.log('[AUTH] ✅ Loaded cookies from YOUTUBE_COOKIES environment variable');
+    return tmpPath;
   }
+
+  // 2. Check if cookies exist as a Render Secret File
+  if (fs.existsSync(renderSecretPath)) {
+    console.log('[AUTH] ✅ Found cookies at /etc/secrets/cookies.txt');
+    return renderSecretPath;
+  }
+
+  // 3. Check local directory
   if (fs.existsSync(localPath)) {
-    console.log('[AUTH] ✅ Found cookies at Local path: ' + localPath);
+    console.log('[AUTH] ✅ Found cookies in local project directory');
     return localPath;
   }
 
-  console.warn('[AUTH] ⚠️ WARNING: No cookies.txt found! YouTube may block requests.');
+  console.warn('[AUTH] ⚠️ WARNING: No cookies found! YouTube may block requests.');
   return null;
 };
 
@@ -32,7 +43,6 @@ const getOptions = () => {
     noCheckCertificates: true,
     noWarnings: true,
     preferFreeFormats: true,
-    // Use mobile clients which are less strictly rate-limited
     extractorArgs: 'youtube:player_client=ios,android,mweb',
   };
 
@@ -45,8 +55,11 @@ const getOptions = () => {
 
 // --- ROOT ROUTE ---
 app.get('/', (req, res) => {
-  const cookieStatus = getCookiesPath() ? '✅ Cookies Loaded' : '❌ No Cookies Found';
-  res.send(`<h1>YouTube Downloader API is Running</h1><p>Status: ${cookieStatus}</p>`);
+  const isLoaded = Boolean(getCookiesPath());
+  res.send(`
+    <h1>YouTube Downloader API is Running</h1>
+    <p>Cookie Status: ${isLoaded ? '✅ <b>Cookies Loaded</b>' : '❌ <b>No Cookies Found</b>'}</p>
+  `);
 });
 
 // --- 1. ENDPOINT TO FETCH VIDEO INFO ---
@@ -77,7 +90,7 @@ app.post('/api/info', async (req, res) => {
       new Map(formats.map((f) => [f.quality, f])).values()
     );
 
-    console.log(`[SUCCESS] Loaded video: "${info.title}" (${uniqueFormats.length} formats)`);
+    console.log(`[SUCCESS] Loaded: "${info.title}" (${uniqueFormats.length} formats)`);
 
     res.json({
       title: info.title,
