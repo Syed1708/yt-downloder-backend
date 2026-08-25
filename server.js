@@ -5,13 +5,13 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// List of public Invidious instances with automatic fallback
-const INVIDIOUS_INSTANCES = [
+// Fallback instances in case the discovery API is slow
+const DEFAULT_INSTANCES = [
   'https://inv.nadeko.net',
-  'https://yewtu.be',
-  'https://invidious.privacydev.net',
-  'https://iv.melmac.space',
   'https://invidious.nerdvpn.de',
+  'https://yt.chocolatemoo53.com',
+  'https://invidious.tiekoetter.com',
+  'https://pipedapi.kavin.rocks',
 ];
 
 // Helper to extract YouTube Video ID
@@ -21,33 +21,99 @@ const extractVideoId = (url) => {
   return match && match[2].length === 11 ? match[2] : null;
 };
 
-// Fetch video data across multiple instances
-const fetchInvidiousData = async (videoId) => {
-  for (const instance of INVIDIOUS_INSTANCES) {
-    try {
-      console.log(`[ENGINE] Trying instance: ${instance}`);
-      const response = await fetch(`${instance}/api/v1/videos/${videoId}`, {
-        headers: { 'Accept': 'application/json' },
-        signal: AbortSignal.timeout(6000),
-      });
+// 1. Dynamically get the top 5 healthiest live servers
+const getLiveInstances = async () => {
+  try {
+    const res = await fetch('https://api.invidious.io/instances.json?sort_by=type,health', {
+      signal: AbortSignal.timeout(3000),
+    });
+    if (res.ok) {
+      const data = await res.json();
+      const healthy = data
+        .filter(([name, info]) => info.type === 'https' && info.api === true)
+        .map(([name, info]) => info.uri)
+        .slice(0, 5);
 
-      if (response.ok) {
-        const data = await response.json();
-        if (data && data.formatStreams && data.formatStreams.length > 0) {
-          console.log(`[ENGINE] ✅ Success using: ${instance}`);
-          return data;
+      if (healthy.length > 0) return healthy;
+    }
+  } catch (e) {
+    console.log('[DISCOVERY] Using fallback list...');
+  }
+  return DEFAULT_INSTANCES;
+};
+
+// 2. Fetch video data with multi-engine fallback (Invidious + Piped)
+const fetchVideoData = async (videoId) => {
+  const instances = await getLiveInstances();
+
+  for (const base of instances) {
+    try {
+      console.log(`[ENGINE] Trying: ${base}`);
+
+      // Handle Piped API structure
+      if (base.includes('piped')) {
+        const res = await fetch(`${base}/streams/${videoId}`, {
+          signal: AbortSignal.timeout(6000),
+        });
+        if (res.ok) {
+          const piped = await res.json();
+          // Filter progressive streams (video + audio)
+          const formats = (piped.videoStreams || [])
+            .filter((v) => !v.videoOnly && v.format === 'mp4')
+            .map((v) => ({
+              itag: v.quality,
+              quality: v.quality,
+              container: 'mp4',
+              url: v.url,
+            }));
+
+          if (formats.length > 0) {
+            console.log(`[ENGINE] ✅ Success using Piped (${base})`);
+            return {
+              title: piped.title,
+              thumbnail: piped.thumbnailUrl,
+              duration: String(piped.duration || 0),
+              formats,
+            };
+          }
+        }
+      } 
+      // Handle Invidious API structure
+      else {
+        const res = await fetch(`${base}/api/v1/videos/${videoId}`, {
+          signal: AbortSignal.timeout(6000),
+        });
+        if (res.ok) {
+          const inv = await res.json();
+          if (inv.formatStreams && inv.formatStreams.length > 0) {
+            const formats = inv.formatStreams.map((f) => ({
+              itag: f.itag || f.qualityLabel,
+              quality: f.qualityLabel || f.resolution || 'MP4 Video',
+              container: f.container || 'mp4',
+              url: f.url,
+            }));
+
+            console.log(`[ENGINE] ✅ Success using Invidious (${base})`);
+            return {
+              title: inv.title,
+              thumbnail: inv.videoThumbnails?.[0]?.url || `https://img.youtube.com/vi/${videoId}/hqdefault.jpg`,
+              duration: String(inv.lengthSeconds || 0),
+              formats,
+            };
+          }
         }
       }
-    } catch (e) {
-      console.warn(`[ENGINE] ⚠️ Instance ${instance} failed: ${e.message}`);
+    } catch (err) {
+      console.warn(`[ENGINE] Failed ${base}: ${err.message}`);
     }
   }
-  throw new Error('All media engines are currently busy. Please try again in a moment.');
+
+  throw new Error('All media stream engines are currently busy. Please try again in a few seconds.');
 };
 
 // --- ROOT ROUTE ---
 app.get('/', (req, res) => {
-  res.send('<h1>✅ YouTube Downloader API is Live (Invidious Engine)</h1>');
+  res.send('<h1>✅ YouTube Downloader API is Live</h1>');
 });
 
 // --- 1. ENDPOINT TO FETCH VIDEO INFO ---
@@ -59,32 +125,20 @@ app.post('/api/info', async (req, res) => {
     return res.status(400).json({ error: 'Please provide a valid YouTube URL.' });
   }
 
-  console.log(`[INFO] Fetching metadata for ID: ${videoId}`);
+  console.log(`[INFO] Fetching info for ID: ${videoId}`);
 
   try {
-    const data = await fetchInvidiousData(videoId);
-
-    // Extract playable MP4 progressive streams (video + audio merged)
-    const formats = (data.formatStreams || []).map((f) => ({
-      itag: f.itag || f.qualityLabel,
-      quality: f.qualityLabel || f.resolution || 'MP4 Video',
-      container: f.container || 'mp4',
-    }));
-
-    // Keep unique quality options (e.g. 720p, 360p)
+    const data = await fetchVideoData(videoId);
+    
+    // Deduplicate format labels
     const uniqueFormats = Array.from(
-      new Map(formats.map((f) => [f.quality, f])).values()
+      new Map(data.formats.map((f) => [f.quality, f])).values()
     );
 
-    const thumbnails = data.videoThumbnails || [];
-    const bestThumbnail = thumbnails.length > 0 
-      ? thumbnails[0].url 
-      : `https://img.youtube.com/vi/${videoId}/hqdefault.jpg`;
-
     res.json({
-      title: data.title || 'YouTube Video',
-      thumbnail: bestThumbnail,
-      duration: String(data.lengthSeconds || 0),
+      title: data.title,
+      thumbnail: data.thumbnail,
+      duration: data.duration,
       formats: uniqueFormats,
     });
   } catch (err) {
@@ -99,19 +153,17 @@ app.get('/api/download', async (req, res) => {
   const videoId = extractVideoId(url);
 
   if (!videoId) {
-    return res.status(400).send('Invalid video URL');
+    return res.status(400).send('Invalid YouTube URL');
   }
 
-  console.log(`[DOWNLOAD] Streaming video ID: ${videoId}`);
+  console.log(`[DOWNLOAD] Processing ID: ${videoId} (itag: ${itag})`);
 
   try {
-    const data = await fetchInvidiousData(videoId);
-    
-    // Find requested format or fallback to best available
-    const format = (data.formatStreams || []).find((f) => String(f.itag) === String(itag)) || data.formatStreams[0];
+    const data = await fetchVideoData(videoId);
+    const format = data.formats.find((f) => String(f.itag) === String(itag)) || data.formats[0];
 
     if (!format || !format.url) {
-      return res.status(404).send('Stream format not available.');
+      return res.status(404).send('Stream URL not found');
     }
 
     const safeTitle = (title || data.title || 'video').replace(/[^a-zA-Z0-9_-]/g, '_');
@@ -119,19 +171,18 @@ app.get('/api/download', async (req, res) => {
     res.header('Content-Disposition', `attachment; filename="${safeTitle}.mp4"`);
     res.header('Content-Type', 'video/mp4');
 
-    // Fetch video stream from direct CDN
+    // Fetch video stream from the CDN
     const videoStream = await fetch(format.url);
-    
     if (!videoStream.ok) {
-      return res.status(videoStream.status).send('Failed to read video stream from CDN.');
+      return res.status(videoStream.status).send('CDN stream unavailable');
     }
 
-    // Pipe the web stream to response
+    // Pipe response stream to mobile client
     const { Readable } = require('stream');
     Readable.fromWeb(videoStream.body).pipe(res);
   } catch (err) {
     console.error('[DOWNLOAD ERROR]:', err.message);
-    res.status(500).send('Failed to download video stream.');
+    res.status(500).send('Failed to stream video.');
   }
 });
 
