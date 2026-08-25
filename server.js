@@ -5,12 +5,13 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// List of public Invidious instances for reliable fallback
+// List of public Invidious instances with automatic fallback
 const INVIDIOUS_INSTANCES = [
   'https://inv.nadeko.net',
+  'https://yewtu.be',
+  'https://invidious.privacydev.net',
+  'https://iv.melmac.space',
   'https://invidious.nerdvpn.de',
-  'https://yt.chocolatemoo53.com',
-  'https://invidious.tiekoetter.com',
 ];
 
 // Helper to extract YouTube Video ID
@@ -20,31 +21,33 @@ const extractVideoId = (url) => {
   return match && match[2].length === 11 ? match[2] : null;
 };
 
-// Fetch video data with automatic instance fallback
+// Fetch video data across multiple instances
 const fetchInvidiousData = async (videoId) => {
   for (const instance of INVIDIOUS_INSTANCES) {
     try {
+      console.log(`[ENGINE] Trying instance: ${instance}`);
       const response = await fetch(`${instance}/api/v1/videos/${videoId}`, {
         headers: { 'Accept': 'application/json' },
-        signal: AbortSignal.timeout(5000), // 5 second timeout per instance
+        signal: AbortSignal.timeout(6000),
       });
 
       if (response.ok) {
         const data = await response.json();
         if (data && data.formatStreams && data.formatStreams.length > 0) {
+          console.log(`[ENGINE] ✅ Success using: ${instance}`);
           return data;
         }
       }
     } catch (e) {
-      console.warn(`Instance ${instance} failed, trying next...`);
+      console.warn(`[ENGINE] ⚠️ Instance ${instance} failed: ${e.message}`);
     }
   }
-  throw new Error('All stream engines are currently busy. Please try again.');
+  throw new Error('All media engines are currently busy. Please try again in a moment.');
 };
 
 // --- ROOT ROUTE ---
 app.get('/', (req, res) => {
-  res.send('<h1>✅ YouTube Downloader API is Live</h1>');
+  res.send('<h1>✅ YouTube Downloader API is Live (Invidious Engine)</h1>');
 });
 
 // --- 1. ENDPOINT TO FETCH VIDEO INFO ---
@@ -66,10 +69,9 @@ app.post('/api/info', async (req, res) => {
       itag: f.itag || f.qualityLabel,
       quality: f.qualityLabel || f.resolution || 'MP4 Video',
       container: f.container || 'mp4',
-      url: f.url, // direct CDN stream URL
     }));
 
-    // Deduplicate format qualities
+    // Keep unique quality options (e.g. 720p, 360p)
     const uniqueFormats = Array.from(
       new Map(formats.map((f) => [f.quality, f])).values()
     );
@@ -86,8 +88,8 @@ app.post('/api/info', async (req, res) => {
       formats: uniqueFormats,
     });
   } catch (err) {
-    console.error('Extraction error:', err.message);
-    res.status(500).json({ error: err.message || 'Failed to load video.' });
+    console.error('[EXTRACTION ERROR]:', err.message);
+    res.status(500).json({ error: err.message });
   }
 });
 
@@ -100,16 +102,16 @@ app.get('/api/download', async (req, res) => {
     return res.status(400).send('Invalid video URL');
   }
 
-  console.log(`[DOWNLOAD] Processing download for ID: ${videoId}`);
+  console.log(`[DOWNLOAD] Streaming video ID: ${videoId}`);
 
   try {
     const data = await fetchInvidiousData(videoId);
     
-    // Find selected format or fallback to best available progressive format
+    // Find requested format or fallback to best available
     const format = (data.formatStreams || []).find((f) => String(f.itag) === String(itag)) || data.formatStreams[0];
 
     if (!format || !format.url) {
-      return res.status(404).send('Selected format stream not available.');
+      return res.status(404).send('Stream format not available.');
     }
 
     const safeTitle = (title || data.title || 'video').replace(/[^a-zA-Z0-9_-]/g, '_');
@@ -117,18 +119,18 @@ app.get('/api/download', async (req, res) => {
     res.header('Content-Disposition', `attachment; filename="${safeTitle}.mp4"`);
     res.header('Content-Type', 'video/mp4');
 
-    // Pipe the direct CDN video stream to the mobile app
+    // Fetch video stream from direct CDN
     const videoStream = await fetch(format.url);
     
     if (!videoStream.ok) {
       return res.status(videoStream.status).send('Failed to read video stream from CDN.');
     }
 
-    // Convert fetch stream to Node stream and pipe
+    // Pipe the web stream to response
     const { Readable } = require('stream');
     Readable.fromWeb(videoStream.body).pipe(res);
   } catch (err) {
-    console.error('Download stream error:', err.message);
+    console.error('[DOWNLOAD ERROR]:', err.message);
     res.status(500).send('Failed to download video stream.');
   }
 });
